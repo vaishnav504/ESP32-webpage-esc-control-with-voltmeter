@@ -1,0 +1,135 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESP32Servo.h>
+
+const char* ssid = "ESC_Voltage_Monitor";
+const char* password = "12345678";
+
+WebServer server(80);
+
+// ESC settings
+const int escPin = 12;
+Servo esc;
+int escValue = 0;
+
+// Voltage monitor settings
+const int analogPin = 34;
+float maxVoltage = 19.53;  // Adjust based on your divider
+int adcMax = 4095;
+
+void setup() {
+  Serial.begin(115200);
+
+  // ESC init
+  esc.setPeriodHertz(50);
+  esc.attach(escPin, 1000, 2000);
+  esc.writeMicroseconds(1000); // Safe start
+
+  // WiFi AP
+  WiFi.softAP(ssid, password);
+  Serial.println("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Web handlers
+  server.on("/", handleRoot);
+  server.on("/set", handleSetSpeed);
+  server.on("/data", handleData);
+  server.begin();
+  Serial.println("Web server running");
+}
+
+void loop() {
+  server.handleClient();
+}
+
+void handleRoot() {
+  server.send(200, "text/html", R"rawliteral(
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>ESC + Voltage Monitor</title>
+      <style>
+        body { font-family: sans-serif; text-align: center; margin: 20px; }
+        input[type=range] { width: 80%; }
+        canvas { border: 1px solid #ccc; max-width: 700px; width: 90%; height: 300px; margin-top: 40px; }
+      </style>
+    </head>
+    <body>
+      <h2>ESC Speed Control</h2>
+      <input type="range" min="0" max="100" value="0" id="speedSlider">
+      <p>Speed: <span id="speedValue">0</span>%</p>
+
+      <h2>Live Voltage Graph</h2>
+      <canvas id="chart" width="700" height="300"></canvas>
+
+      <script>
+        // ESC Slider Logic
+        const slider = document.getElementById('speedSlider');
+        const output = document.getElementById('speedValue');
+        slider.oninput = function() {
+          output.innerText = this.value;
+          fetch("/set?value=" + this.value);
+        }
+
+        // Voltage Graph Logic
+        const canvas = document.getElementById('chart');
+        const ctx = canvas.getContext('2d');
+        let data = [];
+
+        function drawChart() {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.beginPath();
+
+          for (let i = 0; i < data.length; i++) {
+            let x = (i / data.length) * canvas.width;
+            let y = canvas.height - (data[i] / 20.0 * canvas.height);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+
+          ctx.strokeStyle = 'blue';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          if (data.length > 0) {
+            let latest = data[data.length - 1].toFixed(2);
+            ctx.fillStyle = 'black';
+            ctx.font = '16px Arial';
+            ctx.fillText('Voltage: ' + latest + ' V', 10, 20);
+          }
+        }
+
+        function fetchVoltage() {
+          fetch('/data')
+            .then(response => response.json())
+            .then(json => {
+              let voltage = json.voltage;
+              data.push(voltage);
+              if (data.length > 50) data.shift();
+              drawChart();
+            });
+        }
+
+        setInterval(fetchVoltage, 1000); // update every second
+      </script>
+    </body>
+    </html>
+  )rawliteral");
+}
+
+void handleSetSpeed() {
+  if (server.hasArg("value")) {
+    escValue = server.arg("value").toInt();
+    int pwm = map(escValue, 0, 100, 1000, 2000);
+    esc.writeMicroseconds(pwm);
+    Serial.println("ESC PWM: " + String(pwm));
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleData() {
+  int sensorValue = analogRead(analogPin);
+  float voltage = (sensorValue * maxVoltage) / adcMax;
+  String json = "{\"voltage\":" + String(voltage, 2) + "}";
+  server.send(200, "application/json", json);
+}
